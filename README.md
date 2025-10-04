@@ -1,1 +1,1 @@
-Nasa Space Challege 2025, más detalles se iran añadiendo.
+We are passionate stakeholders in the strategic domains of data analysis and visual representation, fully committed to leveraging innovative, impact-driven solutions that catalyze measurable value creation across the organization. Additionally, we maintain an enduring enthusiasm for the interactive, team-building environment of Minecraft
