@@ -1,181 +1,104 @@
 import numpy as np
 import rasterio
-from amulet import Block
-from amulet.api.level import World
-from amulet.api.chunk import Chunk
+from PIL import Image
 import os
+from dotenv import load_dotenv
 
 def leer_geotiff(ruta_archivo):
-    """
-    Lee un archivo GeoTIFF con bandas VH, VV y altura
-    Retorna los arrays de cada banda y metadatos
-    """
+    """Lee GeoTIFF con bandas VH, VV y altura"""
     with rasterio.open(ruta_archivo) as src:
-        # Asumiendo que las bandas están en orden: VH, VV, Altura
         vh = src.read(1)
         vv = src.read(2)
         altura = src.read(3)
-        
-        metadata = {
-            'crs': src.crs,
-            'transform': src.transform,
-            'width': src.width,
-            'height': src.height
-        }
-        
-        return vh, vv, altura, metadata
+        return vh, vv, altura
 
-def clasificar_terreno(vh, vv, altura):
-    """
-    Clasifica el terreno basándose en valores SAR y altura
-    Retorna una matriz con códigos de tipo de terreno
-    """
-    terreno = np.zeros_like(vh, dtype=int)
+def clasificar_terreno(vh, vv):
+    """Clasifica terreno en capas separadas - para datos SAR en dB"""
+    # Mostrar estadísticas de los datos
+    print("\n--- Estadísticas de datos SAR (dB) ---")
+    print(f"VH - Min: {np.nanmin(vh):.2f}, Max: {np.nanmax(vh):.2f}, Media: {np.nanmean(vh):.2f}")
+    print(f"VV - Min: {np.nanmin(vv):.2f}, Max: {np.nanmax(vv):.2f}, Media: {np.nanmean(vv):.2f}")
     
-    # Normalizar valores SAR (ajustar según tus datos)
-    vh_norm = (vh - np.nanmin(vh)) / (np.nanmax(vh) - np.nanmin(vh))
-    vv_norm = (vv - np.nanmin(vv)) / (np.nanmax(vv) - np.nanmin(vv))
+    # Diferencia VV-VH útil para clasificación
+    diferencia = vv - vh
+    print(f"VV-VH - Min: {np.nanmin(diferencia):.2f}, Max: {np.nanmax(diferencia):.2f}, Media: {np.nanmean(diferencia):.2f}")
     
-    # Ratio VH/VV útil para discriminar superficies
-    ratio = np.where(vv != 0, vh / vv, 0)
+    # Capa 1: Agua (valores muy bajos en dB, típicamente < -20 dB)
+    # Agua suele tener backscatter muy bajo (valores muy negativos)
+    umbral_agua = -100  # Ajustar según tus datos
     
-    # Clasificación simple:
-    # 0 - Agua (baja retrodispersión en ambas polarizaciones)
-    # 1 - Vegetación densa (alta VH, ratio alto)
-    # 2 - Tierra/suelo (valores medios)
-    # 3 - Urbano/rocoso (alta VV)
-    # 4 - Nieve/hielo (muy alta retrodispersión)
+    agua = np.zeros_like(vh, dtype=np.uint8)
+    agua_mask = (vh < umbral_agua) & (vv < umbral_agua)
+    agua[agua_mask] = 255
     
-    # Agua: backscatter muy bajo
-    agua_mask = (vh_norm < 0.2) & (vv_norm < 0.2)
-    terreno[agua_mask] = 0
+    print(f"Píxeles clasificados como agua: {np.sum(agua_mask)} de {agua_mask.size} ({100*np.sum(agua_mask)/agua_mask.size:.1f}%)")
     
-    # Vegetación: ratio VH/VV alto
-    veg_mask = (ratio > 0.5) & (~agua_mask)
-    terreno[veg_mask] = 1
+    # Capa 2: Vegetación (diferencia VV-VH pequeña, VH relativamente alto)
+    # Vegetación: diferencia pequeña entre VV y VH
+    vegetacion = np.zeros_like(vh, dtype=np.uint8)
+    # Normalizar diferencia a 0-255 (menos diferencia = más vegetación)
+    dif_norm = np.clip((diferencia - np.nanmin(diferencia)) / (np.nanmax(diferencia) - np.nanmin(diferencia)), 0, 1)
+    veg_values = ((1 - dif_norm) * 255).astype(np.uint8)  # Invertir: menos diferencia = más vegetación
+    vegetacion[~agua_mask] = veg_values[~agua_mask]
     
-    # Urbano/rocoso: VV alto
-    urbano_mask = (vv_norm > 0.7) & (~agua_mask) & (~veg_mask)
-    terreno[urbano_mask] = 3
-    
-    # Nieve/hielo: valores muy altos en ambas
-    nieve_mask = (vh_norm > 0.8) & (vv_norm > 0.8)
-    terreno[nieve_mask] = 4
-    
-    # El resto es tierra/suelo
-    terreno[(terreno == 0) & (~agua_mask) & (~veg_mask) & (~urbano_mask) & (~nieve_mask)] = 2
-    
-    return terreno
 
-def tipo_terreno_a_bloque(tipo):
-    """
-    Mapea el tipo de terreno a bloques de Minecraft
-    """
-    bloques = {
-        0: Block('minecraft', 'water'),           # Agua
-        1: Block('minecraft', 'grass_block'),     # Vegetación
-        2: Block('minecraft', 'dirt'),            # Tierra
-        3: Block('minecraft', 'stone'),           # Urbano/rocoso
-        4: Block('minecraft', 'snow_block')       # Nieve
-    }
-    return bloques.get(tipo, Block('minecraft', 'stone'))
+    # Capa 3: Urbano/rocoso (VV alto, valores menos negativos)
+    urbano = np.zeros_like(vh, dtype=np.uint8)
+    # Normalizar VV a 0-255 (valores menos negativos = más urbano)
+    vv_norm = np.clip((vv - np.nanmin(vv)) / (np.nanmax(vv) - np.nanmin(vv)), 0, 1)
+    urbano_values = (vv_norm * 255).astype(np.uint8)
+    urbano[~agua_mask] = urbano_values[~agua_mask]
+    
+    return agua, vegetacion, urbano
 
-def crear_mundo_minecraft(vh, vv, altura, nombre_mundo='mundo_sar', escala_altura=1.0):
-    """
-    Crea un mundo de Minecraft a partir de datos GeoTIFF
-    """
-    # Clasificar terreno
-    print("Clasificando terreno...")
-    terreno = clasificar_terreno(vh, vv, altura)
-    
-    # Normalizar altura (ajustar al rango de Minecraft -64 a 319)
-    altura_norm = ((altura - np.nanmin(altura)) / 
-                   (np.nanmax(altura) - np.nanmin(altura)) * 100 * escala_altura + 64)
-    altura_norm = np.clip(altura_norm, -64, 319).astype(int)
-    
-    # Crear mundo
-    print("Creando mundo de Minecraft...")
-    world = World.create_world(nombre_mundo, ('java', (1, 18, 0)))
-    
-    # Submuestrear si el GeoTIFF es muy grande
-    filas, cols = vh.shape
-    max_dim = 512  # Máximo tamaño recomendado
-    
-    if filas > max_dim or cols > max_dim:
-        print(f"Submuestreando de {filas}x{cols} a máximo {max_dim}x{max_dim}...")
-        factor = max(filas // max_dim, cols // max_dim) + 1
-        terreno = terreno[::factor, ::factor]
-        altura_norm = altura_norm[::factor, ::factor]
-        filas, cols = terreno.shape
-    
-    print(f"Generando mundo de {filas}x{cols} bloques...")
-    
-    # Generar terreno
-    for x in range(cols):
-        for z in range(filas):
-            if np.isnan(altura[z, x]):
-                continue
-                
-            h = altura_norm[z, x]
-            tipo = terreno[z, x]
-            bloque_superficie = tipo_terreno_a_bloque(tipo)
-            
-            # Colocar bedrock en el fondo
-            world.set_version_block(x, -64, z, 'minecraft:bedrock', 
-                                   ('java', (1, 18, 0)))
-            
-            # Llenar con stone hasta la superficie
-            for y in range(-63, h):
-                world.set_version_block(x, y, z, 'minecraft:stone', 
-                                       ('java', (1, 18, 0)))
-            
-            # Colocar bloque de superficie
-            world.set_version_block(x, h, z, bloque_superficie, 
-                                   ('java', (1, 18, 0)))
-            
-            # Si es vegetación, añadir capas de tierra debajo
-            if tipo == 1 and h > -63:
-                for y in range(max(-63, h-3), h):
-                    world.set_version_block(x, y, z, 'minecraft:dirt', 
-                                           ('java', (1, 18, 0)))
-        
-        if x % 50 == 0:
-            print(f"Progreso: {x}/{cols} columnas")
-    
-    # Guardar mundo
-    print("Guardando mundo...")
-    world.save()
-    world.close()
-    print(f"Mundo guardado en: {nombre_mundo}")
+def normalizar_altura(altura, bits=16):
+    """Normaliza altura a rango 0-65535 (16-bit) o 0-255 (8-bit)"""
+    altura_norm = (altura - np.nanmin(altura)) / (np.nanmax(altura) - np.nanmin(altura))
+    if bits == 16:
+        altura_norm = (altura_norm * 65535).astype(np.uint16)
+    else:
+        altura_norm = (altura_norm * 255).astype(np.uint8)
+    return altura_norm
 
 def main():
-    """
-    Función principal
-    """
     # Configuración
-    ruta_geotiff = 'datos_sar.tif'  # Cambia esto por tu archivo
-    nombre_mundo = 'mundo_sar_minecraft'
-    escala_altura = 1.0  # Ajusta para exagerar o reducir el relieve
+    load_dotenv()
+    ruta_geotiff = os.getenv("RUTA_GEOTIFF")
     
-    # Verificar que existe el archivo
-    if not os.path.exists(ruta_geotiff):
-        print(f"Error: No se encuentra el archivo {ruta_geotiff}")
+    if not ruta_geotiff or not os.path.exists(ruta_geotiff):
+        print("Error: RUTA_GEOTIFF no configurada o archivo no existe")
         return
     
-    # Leer GeoTIFF
-    print(f"Leyendo archivo {ruta_geotiff}...")
-    vh, vv, altura, metadata = leer_geotiff(ruta_geotiff)
+    # Leer datos
+    print(f"Leyendo {ruta_geotiff}...")
+    vh, vv, altura = leer_geotiff(ruta_geotiff)
     
-    print(f"Dimensiones: {metadata['width']}x{metadata['height']}")
-    print(f"Rango VH: {np.nanmin(vh):.2f} a {np.nanmax(vh):.2f}")
-    print(f"Rango VV: {np.nanmin(vv):.2f} a {np.nanmax(vv):.2f}")
-    print(f"Rango altura: {np.nanmin(altura):.2f} a {np.nanmax(altura):.2f}")
+    # Clasificar terreno en capas
+    print("Clasificando terreno en capas...")
+    agua, vegetacion, urbano = clasificar_terreno(vh, vv)
     
-    # Crear mundo
-    crear_mundo_minecraft(vh, vv, altura, nombre_mundo, escala_altura)
+    # Normalizar altura
+    print("Procesando altura...")
+    altura_16bit = normalizar_altura(altura, bits=16)
     
-    print("\n¡Proceso completado!")
-    print(f"Abre el mundo '{nombre_mundo}' en Minecraft Java Edition")
+    # Guardar PNGs
+    print("Guardando imágenes...")
+    Image.fromarray(altura_16bit, mode='I;16').save('layer_height.png')
+    Image.fromarray(agua, mode='L').save('layer_water.png')
+    Image.fromarray(vegetacion, mode='L').save('layer_vegetation.png')
+    Image.fromarray(urbano, mode='L').save('layer_urban.png')
+    
+    print("\n¡Completado!")
+    print("\nCapas generadas:")
+    print("- layer_height.png: Altura del terreno (16-bit)")
+    print("- layer_water.png: Cuerpos de agua (255=agua, 0=tierra)")
+    print("- layer_vegetation.png: Densidad de vegetación (0-255)")
+    print("- layer_urban.png: Áreas urbanas/rocosas (0-255)")
+    print("\nEn WorldPainter:")
+    print("1. Importa layer_height.png como Height Map")
+    print("2. Usa layer_water.png para crear lagos/ríos")
+    print("3. Usa layer_vegetation.png para distribuir árboles/plantas")
+    print("4. Usa layer_urban.png para zonas rocosas/construcciones")
 
 if __name__ == '__main__':
     main()
