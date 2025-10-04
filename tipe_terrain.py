@@ -2,6 +2,7 @@ import numpy as np
 import rasterio
 from PIL import Image
 import os
+from scipy.ndimage import convolve
 from dotenv import load_dotenv
 
 # Agua
@@ -19,7 +20,7 @@ COEF_ARROZAL = {
 
 # Vegetación
 COEF_VEGETACION = {
-    "ratio_min": 0.5
+    "ratio_min": 0.3
 }
 
 # Urbano/rocoso
@@ -51,10 +52,19 @@ def main():
     print("Clasificando terreno en capas...")
     agua, arrozal, vegetacion, urbano, tierra = clasificar_terreno(vh, vv)
     
+    print("Filtrando falsos positivos...")
+    agua      = filtrar_falsos_positivos(agua)
+    arrozal   = filtrar_falsos_positivos(arrozal)
+    vegetacion= filtrar_falsos_positivos(vegetacion)
+    urbano    = filtrar_falsos_positivos(urbano)
+    tierra    = filtrar_falsos_positivos(tierra)
+
     # Normalizar altura
     print("Procesando altura...")
     altura_16bit = normalizar_altura(altura, bits=16)
     
+
+
     # Guardar PNGs en la carpeta
     print("Guardando imágenes...")
     Image.fromarray(altura_16bit, mode='I;16').save(os.path.join(carpeta_salida, 'layer_height.png'))
@@ -66,6 +76,28 @@ def main():
     
     print(f"\n¡Completado! Archivos guardados en: {carpeta_salida}/")
 
+def filtrar_falsos_positivos(matriz, umbral_vecinos=3):
+    """
+    Aplica convolución 2D para eliminar falsos positivos aislados en una máscara binaria.
+    - matriz: np.ndarray binaria (0/255).
+    - umbral_vecinos: número mínimo de vecinos necesarios para conservar el píxel.
+    Retorna la matriz filtrada.
+    """
+    # Kernel 3x3 que cuenta los vecinos (excepto el centro)
+    kernel = np.array([[1,1,1],
+                       [1,0,1],
+                       [1,1,1]], dtype=np.uint8)
+
+    # Convertimos la matriz a 0/1
+    binaria = (matriz > 0).astype(np.uint8)
+
+    # Conteo de vecinos con convolución 2D
+    vecinos = convolve(binaria, kernel, mode='constant', cval=0)
+
+    # Decisión: mantener píxel solo si tiene suficientes vecinos
+    filtrada = np.where((binaria == 1) & (vecinos >= umbral_vecinos), 255, 0).astype(np.uint8)
+
+    return filtrada
 
 def leer_geotiff(ruta_archivo):
     """Lee GeoTIFF con bandas VH, VV y altura"""
@@ -131,6 +163,7 @@ def normalizar_altura(altura, bits=16):
     else:
         altura_norm = (altura_norm * 255).astype(np.uint8)
     return altura_norm
+
 
 
 if __name__ == '__main__':
