@@ -4,4 +4,3 @@ __pycache__/
 resources/
 .env
 *.tif
-*.png
