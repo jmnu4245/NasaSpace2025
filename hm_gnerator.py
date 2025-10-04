@@ -3,7 +3,7 @@ from PIL import Image
 from scipy.ndimage import gaussian_filter
 
 # Entrada/salida
-INPUT_PATH = "resources/DEM.jpg"
+INPUT_PATH = "resources/DEM.png"
 OUT_SMOOTH = "grises_minecraft.png"
 
 # Escala de colores (altura -> RGB)
