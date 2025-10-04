@@ -4,6 +4,8 @@ from PIL import Image
 import os
 from scipy.ndimage import convolve
 from dotenv import load_dotenv
+from sklearn.cluster import KMeans
+from sklearn.ensemble import IsolationForest
 
 # Agua
 COEF_AGUA = {
@@ -30,7 +32,7 @@ COEF_URBANO = {
 def main():
     # Configuración
     load_dotenv()
-    ruta_geotiff = os.getenv("RUTA_GEOTIFF1")
+    ruta_geotiff = os.getenv("RUTA_GEOTIFF2")
     
     if not ruta_geotiff or not os.path.exists(ruta_geotiff):
         print("Error: RUTA_GEOTIFF no configurada o archivo no existe")
@@ -52,12 +54,12 @@ def main():
     print("Clasificando terreno en capas...")
     agua, arrozal, vegetacion, urbano, tierra = clasificar_terreno(vh, vv)
     
-    print("Filtrando falsos positivos...")
-    agua      = filtrar_falsos_positivos(agua)
-    arrozal   = filtrar_falsos_positivos(arrozal)
-    vegetacion= filtrar_falsos_positivos(vegetacion)
-    urbano    = filtrar_falsos_positivos(urbano)
-    tierra    = filtrar_falsos_positivos(tierra)
+    print("Filtrando falsos positivos y recuperando falsos negativos...")
+    agua       = filtrar_falsos(agua, vh, vv, altura)
+    arrozal    = filtrar_falsos(arrozal, vh, vv, altura)
+    vegetacion = filtrar_falsos(vegetacion, vh, vv, altura)
+    urbano     = filtrar_falsos(urbano, vh, vv, altura)
+    tierra     = filtrar_falsos(tierra, vh, vv, altura)
 
     # Normalizar altura
     print("Procesando altura...")
@@ -75,6 +77,59 @@ def main():
     Image.fromarray(tierra, mode='L').save(os.path.join(carpeta_salida, 'layer_soil.png'))
     
     print(f"\n¡Completado! Archivos guardados en: {carpeta_salida}/")
+
+def filtrar_falsos(mask, vh, vv, altura, n_clusters=3, contamination=0.05):
+    """
+    Filtra falsos positivos y añade falsos negativos usando KMeans + IsolationForest.
+    - mask: matriz binaria de la capa (0/255)
+    - vh, vv, altura: matrices con los valores de cada píxel
+    - n_clusters: número de clusters para KMeans
+    - contamination: proporción de outliers para IsolationForest
+    Retorna la máscara filtrada (0/255)
+    """
+    mask_bin = mask > 0
+    coords_mask = np.column_stack([vh[mask_bin], vv[mask_bin], altura[mask_bin]])
+    
+    if len(coords_mask) < n_clusters:
+        return mask  # demasiado pocos puntos
+    
+    # ---------------------------
+    # 1️⃣ Filtrar falsos positivos
+    # ---------------------------
+    kmeans = KMeans(n_clusters=n_clusters, random_state=0).fit(coords_mask)
+    labels = kmeans.labels_
+    cluster_principal = np.bincount(labels).argmax()
+    
+    # IsolationForest dentro del cluster principal
+    principal_coords = coords_mask[labels == cluster_principal]
+    iso = IsolationForest(contamination=contamination, random_state=0).fit(principal_coords)
+    pred = iso.predict(principal_coords)  # 1=normal, -1=outlier
+    
+    nueva_mask = np.zeros_like(mask, dtype=np.uint8)
+    indices = np.argwhere(mask_bin)
+    j = 0
+    for i, (x,y) in enumerate(indices):
+        if labels[i] == cluster_principal:
+            if pred[j] == 1:  # mantener solo los normales
+                nueva_mask[x,y] = 255
+            j += 1
+
+    # ---------------------------
+    # 2️⃣ Añadir falsos negativos (píxeles afuera que parecen correctos)
+    # ---------------------------
+    fuera_mask = np.column_stack([vh[~mask_bin], vv[~mask_bin], altura[~mask_bin]])
+    if len(fuera_mask) > 0:
+        # comparar distancia euclídea al centroide del cluster principal
+        centroide = kmeans.cluster_centers_[cluster_principal]
+        dist = np.linalg.norm(fuera_mask - centroide, axis=1)
+        umbral = np.percentile(dist, 10)  # añadir los más cercanos
+        indices_fuera = np.argwhere(~mask_bin)
+        for i, d in enumerate(dist):
+            if d <= umbral:
+                x, y = indices_fuera[i]
+                nueva_mask[x,y] = 255
+    
+    return nueva_mask
 
 def filtrar_falsos_positivos(matriz, umbral_vecinos=3):
     """

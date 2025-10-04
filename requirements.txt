@@ -6,4 +6,5 @@ rasterio
 amulet-core 
 amulet-nbt
 dotenv
+scikit-learn
 scipy
