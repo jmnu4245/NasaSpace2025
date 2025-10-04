@@ -5,3 +5,4 @@ Pillow
 rasterio
 amulet-core 
 amulet-nbt
+dotenv
