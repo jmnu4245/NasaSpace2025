@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 # Agua
 COEF_AGUA = {
-    "umbral": 0.05
+    "umbral": 0.02
 }
 
 # Arrozales
@@ -24,12 +24,12 @@ COEF_VEGETACION = {
 
 # Urbano/rocoso
 COEF_URBANO = {
-    "vv_min": 1.8
+    "vv_min": 2
 }
 def main():
     # Configuración
     load_dotenv()
-    ruta_geotiff = os.getenv("RUTA_GEOTIFF2")
+    ruta_geotiff = os.getenv("RUTA_GEOTIFF1")
     
     if not ruta_geotiff or not os.path.exists(ruta_geotiff):
         print("Error: RUTA_GEOTIFF no configurada o archivo no existe")
