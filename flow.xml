@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  GPT Graph XML para SNAP: Flujo A - GRD (SAFE) -> GeoTIFF
+  Pasos incluidos: Read -> Apply-Orbit-File -> Calibration (sigma0, dB) ->
+  Speckle Filtering (Refined Lee, opcional) -> Terrain-Correction (Range-Doppler) -> Write (GeoTIFF)
+
+  INSTRUCCIONES:
+  - Reemplaza ${INPUT_SAFE} por la ruta a tu archivo .SAFE
+  - Reemplaza ${OUTPUT_GEOTIFF} por la ruta de salida (ej: /ruta/out.tif)
+  - Si prefieres UTM, cambia MAP_PROJECTION_EPSG a un código EPSG de zona UTM (ej: 32630 para UTM zone 30N).
+  - DEM_NAME por defecto: "SRTM 1Sec" (aprox. 30 m). Alternativa: "Copernicus DEM" si lo tienes disponible en SNAP.
+  - Si no quieres aplicar speckle, elimina o comenta el nodo Speckle-Filter.
+-->
+<graph id="S1_GRD_to_GeoTIFF" version="1.0">
+  <!-- READ -->
+  <node id="Read">
+    <operator>Read</operator>
+    <parameters>
+      <file>${INPUT_SAFE}</file>
+    </parameters>
+  </node>
+
+  <!-- APPLY ORBIT FILE -->
+  <node id="Apply-Orbit-File">
+    <operator>Apply-Orbit-File</operator>
+    <sources>
+      <sourceProduct refid="Read"/>
+    </sources>
+    <parameters>
+      <!-- "Sentinel Precise (Auto Download)" típicamente funciona si tienes conexión -->
+      <orbitType>Sentinel Precise (Auto Download)</orbitType>
+    </parameters>
+  </node>
+
+  <!-- CALIBRATION -->
+  <node id="Calibration">
+    <operator>Calibration</operator>
+    <sources>
+      <sourceProduct refid="Apply-Orbit-File"/>
+    </sources>
+    <parameters>
+      <!-- salida en sigma0 y en dB -->
+      <outputSigmaBand>true</outputSigmaBand>
+      <outputImageScaleInDb>true</outputImageScaleInDb>
+      <!-- desactivar otras bandas innecesarias -->
+      <outputBetaBand>false</outputBetaBand>
+      <outputGammaBand>false</outputGammaBand>
+      <!-- Mantener las polarizaciones tal cual; SNAP usará las bandas disponibles (VH, VV, etc.) -->
+    </parameters>
+  </node>
+
+  <!-- SPECKLE FILTER (opcional; recomendado) -->
+  <node id="Speckle-Filter">
+    <operator>Speckle-Filter</operator>
+    <sources>
+      <sourceProduct refid="Calibration"/>
+    </sources>
+    <parameters>
+      <!-- Opciones habituales: "Lee", "Refined Lee", "Frost", "Gamma Map" -->
+      <filter>Refined Lee</filter>
+      <filterSizeX>7</filterSizeX>
+      <filterSizeY>7</filterSizeY>
+      <estimationWindowSizeX>7</estimationWindowSizeX>
+      <estimationWindowSizeY>7</estimationWindowSizeY>
+      <!-- Si prefieres un filtrado más suave, aumenta el tamaño; para más detalle, reduce -->
+    </parameters>
+  </node>
+
+  <!-- TERRAIN CORRECTION (Range-Doppler) -->
+  <node id="Terrain-Correction">
+    <operator>Terrain-Correction</operator>
+    <sources>
+      <!-- conectar desde Speckle-Filter para que el filtro sea aplicado antes del TC; si no usas speckle, conecta Calibration -->
+      <sourceProduct refid="Speckle-Filter"/>
+    </sources>
+    <parameters>
+      <!-- DEM y proyección -->
+      <demName>SRTM 1Sec</demName>
+      <!-- Si prefieres Copernicus/COPDEM sustituye por "Copernicus DEM" o deja externalDEMFile -->
+      <externalDEMFile></externalDEMFile>
+
+      <!-- Range-Doppler settings (SNAP usa internamente Range-Doppler para GRD cuando está disponible) -->
+      <demResamplingMethod>BILINEAR_INTERPOLATION</demResamplingMethod>
+      <imgResamplingMethod>BILINEAR_INTERPOLATION</imgResamplingMethod>
+      <!-- Proyección de salida: por defecto WGS84 (EPSG:4326). Cambia según prefieras UTM (ej: 32630) -->
+      <mapProjection>EPSG:4326</mapProjection>
+      <pixelSpacingInMeter>10.0</pixelSpacingInMeter>
+      <nodataValueForPixels>0.0</nodataValueForPixels>
+      <saveProjectedLocalIncidenceAngle>true</saveProjectedLocalIncidenceAngle>
+      <saveSelectedSourceBandsOnly>false</saveSelectedSourceBandsOnly>
+    </parameters>
+  </node>
+
+  <!-- WRITE (GeoTIFF) -->
+  <node id="Write">
+    <operator>Write</operator>
+    <sources>
+      <sourceProduct refid="Terrain-Correction"/>
+    </sources>
+    <parameters>
+      <file>${OUTPUT_GEOTIFF}</file>
+      <formatName>GeoTIFF</formatName>
+      <GdalWriteParameters>
+        <Resize>FALSE</Resize>
+      </GdalWriteParameters>
+    </parameters>
+  </node>
+
+</graph>
