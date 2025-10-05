@@ -32,7 +32,7 @@ COEF_URBANO = {
 def main():
     # Configuración
     load_dotenv()
-    ruta_geotiff = os.getenv("RUTA_GEOTIFF2")
+    ruta_geotiff = os.getenv("RUTA_GEOTIFF1")
     
     if not ruta_geotiff or not os.path.exists(ruta_geotiff):
         print("Error: RUTA_GEOTIFF no configurada o archivo no existe")
@@ -54,12 +54,13 @@ def main():
     print("Clasificando terreno en capas...")
     agua, arrozal, vegetacion, urbano, tierra = clasificar_terreno(vh, vv)
     
-    print("Filtrando falsos positivos y recuperando falsos negativos...")
-    agua       = filtrar_falsos(agua, vh, vv, altura)
-    arrozal    = filtrar_falsos(arrozal, vh, vv, altura)
-    vegetacion = filtrar_falsos(vegetacion, vh, vv, altura)
-    urbano     = filtrar_falsos(urbano, vh, vv, altura)
-    tierra     = filtrar_falsos(tierra, vh, vv, altura)
+    print("Filtrando capas con confianza ")
+
+    agua       = filtrar_falsos_rapido(agua, vh, vv, altura, confianza=0.9)
+    arrozal    = filtrar_falsos_rapido(arrozal, vh, vv, altura, confianza=0.5)
+    vegetacion = filtrar_falsos_rapido(vegetacion, vh, vv, altura, confianza=0.5)
+    urbano     = filtrar_falsos_rapido(urbano, vh, vv, altura, confianza=0.8)
+    tierra     = filtrar_falsos_rapido(tierra, vh, vv, altura, confianza=0.9)
 
     # Normalizar altura
     print("Procesando altura...")
@@ -77,6 +78,83 @@ def main():
     Image.fromarray(tierra, mode='L').save(os.path.join(carpeta_salida, 'layer_soil.png'))
     
     print(f"\n¡Completado! Archivos guardados en: {carpeta_salida}/")
+import numpy as np
+from sklearn.cluster import KMeans
+from sklearn.ensemble import IsolationForest
+
+def filtrar_falsos_rapido(mask, vh, vv, altura, n_clusters=3, contamination=0.05, confianza=0.7, max_samples=5000):
+    """
+    Filtra falsos positivos y recupera falsos negativos usando KMeans + IsolationForest.
+    Optimizado para pruebas rápidas y permite ajustar la confianza en la máscara original.
+    
+    - mask: matriz binaria de la capa (0/255)
+    - vh, vv, altura: matrices de entrada
+    - n_clusters: número de clusters para KMeans
+    - contamination: proporción de outliers para IsolationForest
+    - confianza: cuánto confiar en la máscara inicial (0=ignorar, 1=muy estricta)
+    - max_samples: máximo de píxeles a usar para clustering/forest (submuestreo)
+    
+    Retorna la máscara filtrada (0/255)
+    """
+    mask_bin = mask > 0
+    indices_mask = np.argwhere(mask_bin)
+    coords_mask = np.column_stack([vh[mask_bin], vv[mask_bin], altura[mask_bin]])
+    
+    # Submuestreo si hay demasiados píxeles
+    if len(coords_mask) > max_samples:
+        idx = np.random.choice(len(coords_mask), max_samples, replace=False)
+        coords_mask_sub = coords_mask[idx]
+        indices_sub = indices_mask[idx]
+    else:
+        coords_mask_sub = coords_mask
+        indices_sub = indices_mask
+    
+    if len(coords_mask_sub) < n_clusters:
+        return mask  # demasiado pocos puntos
+    
+    # ---------------------------
+    # 1️⃣ Filtrar falsos positivos
+    # ---------------------------
+    kmeans = KMeans(n_clusters=n_clusters, random_state=0, n_init=5).fit(coords_mask_sub)
+    labels = kmeans.labels_
+    cluster_principal = np.bincount(labels).argmax()
+    
+    # IsolationForest en cluster principal
+    principal_coords = coords_mask_sub[labels == cluster_principal]
+    if len(principal_coords) > 50:
+        iso = IsolationForest(contamination=contamination, random_state=0).fit(principal_coords)
+        pred = iso.predict(principal_coords)  # 1=normal, -1=outlier
+    else:
+        pred = np.ones(len(principal_coords))  # demasiado pocos puntos, todo normal
+    
+    nueva_mask = mask.copy()  # empezamos con la máscara original
+    j = 0
+    for i, (x,y) in enumerate(indices_sub):
+        if labels[i] == cluster_principal:
+            if pred[j] == 1:
+                nueva_mask[x,y] = 255
+            else:
+                # Reducir el impacto según confianza
+                if np.random.rand() > confianza:
+                    nueva_mask[x,y] = 0
+            j += 1
+    
+    # ---------------------------
+    # 2️⃣ Añadir falsos negativos (píxeles afuera)
+    # ---------------------------
+    indices_fuera = np.argwhere(~mask_bin)
+    coords_fuera = np.column_stack([vh[~mask_bin], vv[~mask_bin], altura[~mask_bin]])
+    if len(coords_fuera) > 0:
+        centroide = kmeans.cluster_centers_[cluster_principal]
+        dist = np.linalg.norm(coords_fuera - centroide, axis=1)
+        umbral = np.percentile(dist, int(10*(1-confianza)))  # menos confianza → más píxeles añadidos
+        for i, d in enumerate(dist):
+            if d <= umbral:
+                x, y = indices_fuera[i]
+                nueva_mask[x,y] = 255
+    
+    return nueva_mask
+
 
 def filtrar_falsos(mask, vh, vv, altura, n_clusters=3, contamination=0.05):
     """
